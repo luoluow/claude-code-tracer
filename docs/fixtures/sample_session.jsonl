@@ -1,0 +1,11 @@
+{"session_id":"sample01","hook_event_name":"SessionStart","source":"startup","model":"claude-opus-4-8","cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:00"}
+{"session_id":"sample01","hook_event_name":"UserPromptSubmit","prompt":"fix the failing test in auth","cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:01"}
+{"session_id":"sample01","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"},"cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:03"}
+{"session_id":"sample01","hook_event_name":"PostToolUse","tool_name":"Bash","tool_response":"FAIL auth.test.ts\n  expected 200, got 401\nexit 1","cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:04"}
+{"session_id":"sample01","hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"src/auth.ts","offset":1,"limit":240},"cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:09"}
+{"session_id":"sample01","hook_event_name":"PostToolUse","tool_name":"Read","tool_response":"240 lines read","cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:09"}
+{"session_id":"sample01","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"src/auth.ts","old_string":"return res.status(401)","new_string":"return res.status(200)"},"cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:14"}
+{"session_id":"sample01","hook_event_name":"PostToolUse","tool_name":"Edit","tool_response":"ok","cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:14"}
+{"session_id":"sample01","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"},"cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:30"}
+{"session_id":"sample01","hook_event_name":"PostToolUse","tool_name":"Bash","tool_response":"PASS auth.test.ts\nexit 0","cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:33"}
+{"session_id":"sample01","hook_event_name":"Stop","stop_reason":"end_turn","cwd":"/home/dev/forked/cct","_ts":"2026-05-28T17:42:35"}

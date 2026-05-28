@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Claude Code Tracer — receives hook events via HTTP, logs to JSONL, prints to terminal."""
+"""Claude Code Tracer — FastAPI app: receives hook events, logs to per-session JSONL,
+broadcasts via SSE, serves the web UI."""
 
+import asyncio
 import json
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 PORT = 7355
 LOG_DIR = Path.home() / ".claude-tracer"
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 C = {
     "PreToolUse":       "\033[33m",
@@ -20,35 +27,91 @@ C = {
     "BOLD":             "\033[1m",
 }
 
+subscribers: set[asyncio.Queue] = set()
 
-class Handler(BaseHTTPRequestHandler):
-    log_file = None
+app = FastAPI()
 
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
+
+@app.post("/event")
+async def post_event(request: Request):
+    event = await request.json()
+    event["_ts"] = datetime.now().isoformat()
+
+    session_id = event.get("session_id") or "unknown"
+    line = json.dumps(event, separators=(",", ":"))
+    LOG_DIR.mkdir(exist_ok=True)
+    with open(LOG_DIR / f"{session_id}.jsonl", "a") as f:
+        f.write(line + "\n")
+
+    _print_event(event)
+
+    for q in subscribers:
+        q.put_nowait(line)
+
+    return {}
+
+
+@app.get("/sessions")
+async def get_sessions():
+    sessions = []
+    for path in LOG_DIR.glob("*.jsonl"):
+        events = _read_events(path)
+        if not events:
+            continue
+        model = cwd = None
+        for ev in events:
+            if ev.get("hook_event_name") == "SessionStart":
+                model = ev.get("model")
+                cwd = ev.get("cwd")
+                break
+        if model is None:
+            model = next((ev["model"] for ev in events if "model" in ev), None)
+        if cwd is None:
+            cwd = next((ev["cwd"] for ev in events if "cwd" in ev), None)
+        sessions.append({
+            "session_id": path.stem,
+            "started_at": events[0].get("_ts"),
+            "ended_at": events[-1].get("_ts"),
+            "cwd": cwd,
+            "model": model,
+            "event_count": len(events),
+        })
+    sessions.sort(key=lambda s: s["started_at"] or "", reverse=True)
+    return sessions
+
+
+@app.get("/events/{session_id}")
+async def get_events(session_id: str):
+    return _read_events(LOG_DIR / f"{session_id}.jsonl")
+
+
+@app.get("/stream")
+async def stream():
+    q: asyncio.Queue = asyncio.Queue()
+    subscribers.add(q)
+
+    async def gen():
         try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            self.send_response(400)
-            self.end_headers()
-            return
+            while True:
+                line = await q.get()
+                yield f"event: trace\ndata: {line}\n\n"
+        finally:
+            subscribers.discard(q)
 
-        event["_ts"] = datetime.now().isoformat()
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
-        if self.log_file:
-            self.log_file.write(json.dumps(event) + "\n")
-            self.log_file.flush()
 
-        _print_event(event)
+@app.get("/export/{session_id}")
+async def export(session_id: str):
+    path = LOG_DIR / f"{session_id}.jsonl"
+    return PlainTextResponse(path.read_text() if path.exists() else "")
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b"{}")
 
-    def log_message(self, *_):
-        pass  # suppress default request logs
+def _read_events(path: Path):
+    if not path.exists():
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def _print_event(event):
@@ -91,26 +154,10 @@ def _clip(s, n=120):
     return (s[:n] + "…") if len(s) > n else s
 
 
-def main():
-    LOG_DIR.mkdir(exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = LOG_DIR / f"session_{stamp}.jsonl"
-
-    R, B, D = C["RESET"], C["BOLD"], C["DIM"]
-    print(f"{B}Claude Code Tracer{R}")
-    print(f"Session : {stamp}")
-    print(f"Log     : {log_path}")
-    print(f"Port    : {PORT}")
-    print()
-
-    with open(log_path, "w") as f:
-        Handler.log_file = f
-        server = HTTPServer(("127.0.0.1", PORT), Handler)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            print(f"\nTracer stopped — log saved to {log_path}")
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
 if __name__ == "__main__":
-    main()
+    R, B = C["RESET"], C["BOLD"]
+    print(f"{B}Claude Code Tracer{R}  —  http://127.0.0.1:{PORT}\n")
+    uvicorn.run(app, host="127.0.0.1", port=PORT)

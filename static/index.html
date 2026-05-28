@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code Tracer</title>
+<style>
+  :root {
+    --bg: #1e1e1e; --panel: #252526; --border: #3a3a3a; --fg: #d4d4d4;
+    --muted: #888; --accent: #4ec9b0; --sel: #094771;
+    --err: #f48771; --ok: #6a9955; --edit: #c586c0;
+    --user: #569cd6; --pre: #dcdcaa; --post: #9cdcfe; --stop: #ce9178; --start: #808080;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: var(--bg); color: var(--fg); display: flex; overflow: hidden;
+  }
+  .pane { height: 100vh; overflow-y: auto; }
+  #sessions { width: 220px; border-right: 1px solid var(--border); flex: none; }
+  #timeline-pane { flex: 1; min-width: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  #inspector { width: 420px; flex: none; padding: 12px; }
+  .pane-header {
+    padding: 8px 10px; font-weight: bold; color: var(--accent);
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel);
+  }
+  /* Sessions */
+  .session {
+    padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer;
+  }
+  .session:hover { background: #2a2d2e; }
+  .session.selected { background: var(--sel); }
+  .session .row1 { display: flex; align-items: center; gap: 6px; }
+  .session .proj { color: var(--fg); }
+  .session .meta { color: var(--muted); font-size: 11px; }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+    display: inline-block; animation: pulse 1.4s infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  /* Timeline header / controls */
+  #timeline-controls {
+    display: flex; gap: 8px; align-items: center; padding: 8px 10px;
+    border-bottom: 1px solid var(--border); background: var(--panel); flex: none; flex-wrap: wrap;
+  }
+  #timeline-controls .title { color: var(--accent); font-weight: bold; flex: 1; min-width: 120px; }
+  select, button {
+    font: inherit; background: #333; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 3px 6px; cursor: pointer;
+  }
+  button.active { background: var(--sel); }
+  #timeline { overflow-y: auto; flex: 1; }
+  /* Timeline rows */
+  .ev {
+    display: grid; grid-template-columns: 70px 130px 1fr; gap: 8px;
+    padding: 4px 10px; border-bottom: 1px solid #2a2a2a; cursor: pointer; align-items: baseline;
+  }
+  .ev:hover { background: #2a2d2e; }
+  .ev.selected { background: var(--sel); }
+  .ev.paired { border-left: 2px solid var(--post); }
+  .ev .ts { color: var(--muted); font-size: 11px; }
+  .ev .kind { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev .preview { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .k-SessionStart .kind { color: var(--start); }
+  .k-UserPromptSubmit .kind { color: var(--user); }
+  .k-PreToolUse .kind { color: var(--pre); }
+  .k-PostToolUse .kind { color: var(--post); }
+  .k-Stop .kind { color: var(--stop); }
+  .mark-err { color: var(--err); font-weight: bold; }
+  .mark-edit { color: var(--edit); }
+  /* Inspector */
+  #inspector h2 { font-size: 14px; color: var(--accent); margin: 0 0 2px; }
+  #inspector .sub { color: var(--muted); margin-bottom: 12px; }
+  .field-label { color: var(--accent); margin: 12px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  pre {
+    background: #1b1b1b; border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-x: auto;
+  }
+  .diff-add { color: var(--ok); }
+  .diff-del { color: var(--err); }
+  .result-err { color: var(--err); }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+  .pair-note { color: var(--post); font-size: 11px; margin-bottom: 8px; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+  <div id="sessions" class="pane">
+    <div class="pane-header">SESSIONS</div>
+    <div id="sessions-list"></div>
+  </div>
+
+  <div id="timeline-pane" class="pane" style="overflow:hidden;">
+    <div id="timeline-controls">
+      <span class="title" id="timeline-title">Timeline</span>
+      <span id="live-indicator"></span>
+      <select id="filter"><option value="">all types</option></select>
+      <button id="follow-toggle" title="Pause/resume live follow">⏸ pause</button>
+    </div>
+    <div id="timeline"><div class="empty">Select a session</div></div>
+  </div>
+
+  <div id="inspector" class="pane">
+    <div class="pane-header" style="margin:-12px -12px 12px;">INSPECTOR</div>
+    <div id="inspector-body"><div class="empty">Click an event</div></div>
+  </div>
+
+<script>
+"use strict";
+
+// ---- state ----
+let events = [];          // events for selected session, in order
+let selectedSession = null;
+let selectedIndex = -1;
+let typeFilter = "";
+let paused = false;       // live-follow paused
+let evtSource = null;
+
+// ---- helpers ----
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const basename = (p) => p ? p.split("/").filter(Boolean).pop() || p : "?";
+const timeOnly = (ts) => (ts && ts.includes("T")) ? ts.split("T")[1] : (ts || "");
+
+// A tool_response is an error if it looks like a non-zero exit / FAIL / error.
+function responseIsError(resp) {
+  const s = (typeof resp === "string") ? resp : JSON.stringify(resp || "");
+  const m = s.match(/exit\s+(\d+)/i);
+  if (m && Number(m[1]) !== 0) return true;
+  return /\b(FAIL|error)\b/i.test(s);
+}
+
+// ---- sessions list ----
+async function loadSessions() {
+  let sessions = [];
+  try {
+    const r = await fetch("/sessions");
+    sessions = await r.json();
+  } catch (e) {
+    $("sessions-list").innerHTML = '<div class="empty">No backend</div>';
+    return;
+  }
+  renderSessions(sessions);
+}
+
+function renderSessions(sessions) {
+  const now = Date.now();
+  const el = $("sessions-list");
+  el.innerHTML = "";
+  for (const s of sessions) {
+    // "live" heuristic: last event within 60s (backend gives no explicit flag).
+    const live = s.ended_at && (now - Date.parse(s.ended_at) < 60000);
+    const div = document.createElement("div");
+    div.className = "session" + (s.session_id === selectedSession ? " selected" : "");
+    div.innerHTML =
+      '<div class="row1">' +
+        (live ? '<span class="live-dot"></span>' : "") +
+        '<span>' + esc(timeOnly(s.started_at)) + '</span>' +
+      '</div>' +
+      '<div class="proj">' + esc(basename(s.cwd)) + '</div>' +
+      '<div class="meta">' + esc(s.model || "?") + ' · ' + (s.event_count || 0) + ' events</div>';
+    div.onclick = () => selectSession(s.session_id, s);
+    el.appendChild(div);
+  }
+}
+
+// ---- timeline ----
+async function selectSession(id, meta) {
+  selectedSession = id;
+  selectedIndex = -1;
+  $("inspector-body").innerHTML = '<div class="empty">Click an event</div>';
+  $("timeline-title").textContent = "Timeline · " + basename(meta && meta.cwd) +
+    (meta && meta.model ? " · " + meta.model : "");
+  try {
+    const r = await fetch("/events/" + encodeURIComponent(id));
+    events = await r.json();
+  } catch (e) {
+    events = [];
+  }
+  buildFilterOptions();
+  renderTimeline();
+  // refresh selected styling in sessions list
+  document.querySelectorAll(".session").forEach(n => n.classList.remove("selected"));
+  loadSessions();
+}
+
+function buildFilterOptions() {
+  const opts = new Set();
+  for (const e of events) {
+    opts.add(e.hook_event_name);
+    if (e.tool_name) opts.add(e.hook_event_name + ":" + e.tool_name);
+  }
+  const sel = $("filter");
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">all types</option>';
+  [...opts].sort().forEach(o => {
+    const op = document.createElement("option");
+    op.value = o; op.textContent = o;
+    sel.appendChild(op);
+  });
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : "";
+}
+
+function passesFilter(e) {
+  if (!typeFilter) return true;
+  if (typeFilter.includes(":")) {
+    const [k, t] = typeFilter.split(":");
+    return e.hook_event_name === k && e.tool_name === t;
+  }
+  return e.hook_event_name === typeFilter;
+}
+
+// Map each PostToolUse index -> matching preceding PreToolUse index (same tool).
+function computePairs() {
+  const pairs = {};         // postIndex -> preIndex
+  const pendingPre = {};    // tool_name -> last unmatched pre index
+  events.forEach((e, i) => {
+    if (e.hook_event_name === "PreToolUse") {
+      pendingPre[e.tool_name] = i;
+    } else if (e.hook_event_name === "PostToolUse") {
+      if (pendingPre[e.tool_name] != null) {
+        pairs[i] = pendingPre[e.tool_name];
+        delete pendingPre[e.tool_name];
+      }
+    }
+  });
+  return pairs;
+}
+
+function eventPreview(e) {
+  switch (e.hook_event_name) {
+    case "SessionStart": return "model " + esc(e.model || "?");
+    case "UserPromptSubmit": return '"' + esc((e.prompt || "").slice(0, 120)) + '"';
+    case "PreToolUse": {
+      const ti = e.tool_input || {};
+      if (e.tool_name === "Bash") return esc(ti.command || "");
+      if (e.tool_name === "Read" || e.tool_name === "Edit" || e.tool_name === "Write")
+        return esc(ti.file_path || "");
+      if (e.tool_name === "Task") return esc(ti.subagent_type || "");
+      return esc(JSON.stringify(ti));
+    }
+    case "PostToolUse": {
+      const r = e.tool_response;
+      const s = (typeof r === "string") ? r : JSON.stringify(r);
+      return esc((s || "").replace(/\s+/g, " ").slice(0, 120));
+    }
+    case "Stop": return esc(e.stop_reason || "");
+    default: return "";
+  }
+}
+
+function rowKind(e) {
+  if (e.hook_event_name === "PreToolUse") return "PreTool " + esc(e.tool_name || "");
+  if (e.hook_event_name === "PostToolUse") return "PostTool " + esc(e.tool_name || "");
+  return esc(e.hook_event_name);
+}
+
+function rowMarkers(e) {
+  let m = "";
+  if (e.hook_event_name === "PostToolUse" && responseIsError(e.tool_response))
+    m += ' <span class="mark-err">✗</span>';
+  if (e.hook_event_name === "PostToolUse" && !responseIsError(e.tool_response))
+    m += ' <span style="color:var(--ok)">✓</span>';
+  if (e.tool_name === "Edit") m += ' <span class="mark-edit">◆</span>';
+  return m;
+}
+
+function renderTimeline() {
+  const tl = $("timeline");
+  if (!events.length) { tl.innerHTML = '<div class="empty">No events</div>'; return; }
+  const pairs = computePairs();
+  const pairedPre = new Set(Object.values(pairs));
+  tl.innerHTML = "";
+  events.forEach((e, i) => {
+    if (!passesFilter(e)) return;
+    const isPaired = pairs[i] != null || pairedPre.has(i);
+    const div = document.createElement("div");
+    div.className = "ev k-" + e.hook_event_name +
+      (i === selectedIndex ? " selected" : "") + (isPaired ? " paired" : "");
+    div.innerHTML =
+      '<span class="ts">' + esc(timeOnly(e._ts)) + '</span>' +
+      '<span class="kind">' + rowKind(e) + '</span>' +
+      '<span class="preview">' + eventPreview(e) + rowMarkers(e) + '</span>';
+    div.onclick = () => selectEvent(i);
+    tl.appendChild(div);
+  });
+}
+
+// ---- inspector ----
+function selectEvent(i) {
+  selectedIndex = i;
+  renderTimeline();
+  renderInspector(i);
+}
+
+function renderInspector(i) {
+  const e = events[i];
+  const pairs = computePairs();
+  const body = $("inspector-body");
+  let html = '<h2>' + rowKind(e) + '</h2>' +
+             '<div class="sub">' + esc(e._ts || "") + '</div>';
+
+  // Pre/Post pairing note
+  if (e.hook_event_name === "PostToolUse" && pairs[i] != null) {
+    html += '<div class="pair-note">↳ paired with PreToolUse · ' +
+      esc(events[pairs[i]].tool_name) + ' at ' + esc(timeOnly(events[pairs[i]]._ts)) + '</div>';
+  }
+
+  html += renderByType(e);
+
+  // raw JSON toggle
+  html += '<details><summary>show raw JSON</summary><pre>' +
+    esc(JSON.stringify(e, null, 2)) + '</pre></details>';
+
+  body.innerHTML = html;
+}
+
+function field(label, value) {
+  return '<div class="field-label">' + label + '</div><pre>' + esc(value) + '</pre>';
+}
+
+function renderByType(e) {
+  const ti = e.tool_input || {};
+  switch (e.hook_event_name) {
+    case "UserPromptSubmit":
+      return field("prompt", e.prompt || "");
+    case "Stop":
+      return field("stop reason", e.stop_reason || "");
+    case "SessionStart":
+      return field("source", e.source || "") + field("model", e.model || "");
+    case "PreToolUse":
+      if (e.tool_name === "Bash") return field("command", ti.command || "");
+      if (e.tool_name === "Edit") return renderDiff(ti.file_path, ti.old_string, ti.new_string);
+      if (e.tool_name === "Write")
+        return field("file", ti.file_path || "") +
+               renderDiff(ti.file_path, "", ti.content || "");
+      if (e.tool_name === "Read") {
+        let range = "";
+        if (ti.offset != null || ti.limit != null)
+          range = "offset " + (ti.offset ?? "?") + ", limit " + (ti.limit ?? "?");
+        return field("file", ti.file_path || "") + (range ? field("range", range) : "");
+      }
+      if (e.tool_name === "Task")
+        return field("agent type", ti.subagent_type || "") + field("prompt", ti.prompt || "");
+      return field("tool input", JSON.stringify(ti, null, 2));
+    case "PostToolUse":
+      return renderResult(e.tool_response);
+    default:
+      return field("payload", JSON.stringify(e, null, 2));
+  }
+}
+
+function renderDiff(path, oldStr, newStr) {
+  const oldLines = String(oldStr || "").split("\n");
+  const newLines = String(newStr || "").split("\n");
+  let lines = "";
+  oldLines.forEach(l => { lines += '<span class="diff-del">- ' + esc(l) + '</span>\n'; });
+  newLines.forEach(l => { lines += '<span class="diff-add">+ ' + esc(l) + '</span>\n'; });
+  return (path ? '<div class="field-label">file</div><pre>' + esc(path) + '</pre>' : "") +
+    '<div class="field-label">diff</div><pre>' + lines + '</pre>';
+}
+
+function renderResult(resp) {
+  const s = (typeof resp === "string") ? resp : JSON.stringify(resp, null, 2);
+  const err = responseIsError(resp);
+  return '<div class="field-label">result</div>' +
+    '<pre' + (err ? ' class="result-err"' : "") + '>' + esc(s) + '</pre>';
+}
+
+// ---- live follow (SSE per CONTRACT §3/§4) ----
+function startStream() {
+  if (typeof EventSource === "undefined") return;
+  evtSource = new EventSource("/stream");
+  evtSource.addEventListener("trace", (msg) => {
+    if (paused) return;
+    let ev;
+    try { ev = JSON.parse(msg.data); } catch (e) { return; }
+    if (ev.session_id !== selectedSession) return;
+    events.push(ev);
+    buildFilterOptions();
+    renderTimeline();
+    // auto-scroll to newest
+    const tl = $("timeline");
+    tl.scrollTop = tl.scrollHeight;
+  });
+}
+
+// ---- wiring ----
+$("filter").onchange = (e) => { typeFilter = e.target.value; renderTimeline(); };
+$("follow-toggle").onclick = () => {
+  paused = !paused;
+  const b = $("follow-toggle");
+  b.textContent = paused ? "▶ resume" : "⏸ pause";
+  b.classList.toggle("active", paused);
+};
+
+loadSessions();
+startStream();
+setInterval(loadSessions, 5000); // refresh session list / live dots
+</script>
+</body>
+</html>
