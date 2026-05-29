@@ -2,4 +2,5 @@
 DATE=$(date +"%Y%m%d%H%M")
 
 cd "$(dirname "$0")"
-./tracer/start.sh > temp/tracer_$DATE.log 2>&1 &
+
+./forwarder/start.sh > temp/forwarder_$DATE.log 2>&1 &

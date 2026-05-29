@@ -10,6 +10,7 @@
     --muted: #888; --accent: #4ec9b0; --sel: #094771;
     --err: #f48771; --ok: #6a9955; --edit: #c586c0;
     --user: #569cd6; --pre: #dcdcaa; --post: #9cdcfe; --stop: #ce9178; --start: #808080;
+    --api: #d7ba7d;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -45,11 +46,14 @@
     border-bottom: 1px solid var(--border); background: var(--panel); flex: none; flex-wrap: wrap;
   }
   #timeline-controls .title { color: var(--accent); font-weight: bold; flex: 1; min-width: 120px; }
-  select, button {
+  select, button, input {
     font: inherit; background: #333; color: var(--fg); border: 1px solid var(--border);
     border-radius: 3px; padding: 3px 6px; cursor: pointer;
   }
+  input { cursor: text; width: 130px; }
   button.active { background: var(--sel); }
+  .ev .dur { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  mark.match-hl { background: #5a4b00; color: #fff; border-radius: 2px; }
   #timeline { overflow-y: auto; flex: 1; }
   /* Timeline rows */
   .ev {
@@ -67,6 +71,7 @@
   .k-PreToolUse .kind { color: var(--pre); }
   .k-PostToolUse .kind { color: var(--post); }
   .k-Stop .kind { color: var(--stop); }
+  .k-ApiCall .kind { color: var(--api); }
   .mark-err { color: var(--err); font-weight: bold; }
   .mark-edit { color: var(--edit); }
   /* Inspector */
@@ -97,6 +102,8 @@
       <span class="title" id="timeline-title">Timeline</span>
       <span id="live-indicator"></span>
       <select id="filter"><option value="">all types</option></select>
+      <input id="search" type="text" placeholder="search…" autocomplete="off">
+      <button id="next-error" title="Jump to next failed tool call">↓ error</button>
       <button id="follow-toggle" title="Pause/resume live follow">⏸ pause</button>
     </div>
     <div id="timeline"><div class="empty">Select a session</div></div>
@@ -115,6 +122,7 @@ let events = [];          // events for selected session, in order
 let selectedSession = null;
 let selectedIndex = -1;
 let typeFilter = "";
+let searchTerm = "";      // lowercased free-text search within session
 let paused = false;       // live-follow paused
 let evtSource = null;
 
@@ -130,6 +138,40 @@ function responseIsError(resp) {
   const m = s.match(/exit\s+(\d+)/i);
   if (m && Number(m[1]) !== 0) return true;
   return /\b(FAIL|error)\b/i.test(s);
+}
+
+// Free-text search: everything a user might look for in one lowercased string.
+function eventHaystack(e) {
+  const ti = e.tool_input || {};
+  const parts = [e.hook_event_name, e.tool_name, e.prompt, e.stop_reason,
+                 ti.command, ti.file_path, ti.subagent_type, ti.prompt];
+  if (e.tool_response != null)
+    parts.push(typeof e.tool_response === "string" ? e.tool_response : JSON.stringify(e.tool_response));
+  if (e.hook_event_name === "ApiCall" && e.response) {
+    parts.push(e.response.model, e.response.stop_reason);
+    if (Array.isArray(e.response.content))
+      parts.push(e.response.content.filter(b => b.type === "text").map(b => b.text).join(" "));
+  }
+  return parts.filter(Boolean).join(" ").toLowerCase();
+}
+function passesSearch(e) {
+  return !searchTerm || eventHaystack(e).includes(searchTerm);
+}
+
+// Wrap matches of the current search term in already-escaped preview HTML.
+function highlight(html) {
+  if (!searchTerm) return html;
+  try {
+    const re = new RegExp("(" + esc(searchTerm).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "ig");
+    return html.replace(re, '<mark class="match-hl">$1</mark>');
+  } catch (e) { return html; }
+}
+
+// Duration between a paired Pre/Post tool call, from their _ts timestamps.
+function fmtDur(ms) { return ms < 1000 ? ms + "ms" : (ms / 1000).toFixed(1) + "s"; }
+function pairDuration(preEv, postEv) {
+  const a = Date.parse(preEv._ts), b = Date.parse(postEv._ts);
+  return (isNaN(a) || isNaN(b)) ? null : b - a;
 }
 
 // ---- sessions list ----
@@ -247,6 +289,16 @@ function eventPreview(e) {
       return esc((s || "").replace(/\s+/g, " ").slice(0, 120));
     }
     case "Stop": return esc(e.stop_reason || "");
+    case "ApiCall": {
+      const r = e.response || {}, u = e.usage || {};
+      const txt = (Array.isArray(r.content) ? r.content : [])
+        .filter(b => b.type === "text").map(b => b.text).join(" ").slice(0, 80);
+      const bits = [];
+      if (r.model) bits.push(esc(r.model));
+      if (r.stop_reason) bits.push(esc(r.stop_reason));
+      if (u.output_tokens != null) bits.push(u.output_tokens + " out tok");
+      return bits.join(" · ") + (txt ? ' — "' + esc(txt) + '"' : "");
+    }
     default: return "";
   }
 }
@@ -274,15 +326,21 @@ function renderTimeline() {
   const pairedPre = new Set(Object.values(pairs));
   tl.innerHTML = "";
   events.forEach((e, i) => {
-    if (!passesFilter(e)) return;
+    if (!passesFilter(e) || !passesSearch(e)) return;
     const isPaired = pairs[i] != null || pairedPre.has(i);
+    let dur = "";
+    if (pairs[i] != null) {
+      const ms = pairDuration(events[pairs[i]], e);
+      if (ms != null) dur = '<span class="dur">' + fmtDur(ms) + '</span>';
+    }
     const div = document.createElement("div");
     div.className = "ev k-" + e.hook_event_name +
       (i === selectedIndex ? " selected" : "") + (isPaired ? " paired" : "");
+    div.dataset.index = i;
     div.innerHTML =
       '<span class="ts">' + esc(timeOnly(e._ts)) + '</span>' +
       '<span class="kind">' + rowKind(e) + '</span>' +
-      '<span class="preview">' + eventPreview(e) + rowMarkers(e) + '</span>';
+      '<span class="preview">' + highlight(eventPreview(e)) + rowMarkers(e) + dur + '</span>';
     div.onclick = () => selectEvent(i);
     tl.appendChild(div);
   });
@@ -293,6 +351,23 @@ function selectEvent(i) {
   selectedIndex = i;
   renderTimeline();
   renderInspector(i);
+  const sel = $("timeline").querySelector(".ev.selected");
+  if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+
+// Select the next failed tool call among currently-visible rows (wraps around).
+function jumpToNextError() {
+  const n = events.length;
+  if (!n) return;
+  for (let step = 1; step <= n; step++) {
+    const i = (selectedIndex + step + n) % n;
+    const e = events[i];
+    if (e.hook_event_name === "PostToolUse" && responseIsError(e.tool_response) &&
+        passesFilter(e) && passesSearch(e)) {
+      selectEvent(i);
+      return;
+    }
+  }
 }
 
 function renderInspector(i) {
@@ -304,8 +379,10 @@ function renderInspector(i) {
 
   // Pre/Post pairing note
   if (e.hook_event_name === "PostToolUse" && pairs[i] != null) {
+    const ms = pairDuration(events[pairs[i]], e);
     html += '<div class="pair-note">↳ paired with PreToolUse · ' +
-      esc(events[pairs[i]].tool_name) + ' at ' + esc(timeOnly(events[pairs[i]]._ts)) + '</div>';
+      esc(events[pairs[i]].tool_name) + ' at ' + esc(timeOnly(events[pairs[i]]._ts)) +
+      (ms != null ? ' · took ' + fmtDur(ms) : "") + '</div>';
   }
 
   html += renderByType(e);
@@ -347,9 +424,72 @@ function renderByType(e) {
       return field("tool input", JSON.stringify(ti, null, 2));
     case "PostToolUse":
       return renderResult(e.tool_response);
+    case "ApiCall":
+      return renderApiCall(e);
     default:
       return field("payload", JSON.stringify(e, null, 2));
   }
+}
+
+// ApiCall: the "why" tier — tokens, response, system prompt, conversation context.
+function renderApiCall(e) {
+  const req = e.request || {}, res = e.response || {}, u = e.usage || {};
+  let html = "";
+  const ub = [];
+  if (u.input_tokens != null) ub.push(u.input_tokens + " in");
+  if (u.output_tokens != null) ub.push(u.output_tokens + " out");
+  if (u.cache_read_input_tokens != null) ub.push(u.cache_read_input_tokens + " cache-read");
+  if (u.cache_creation_input_tokens != null) ub.push(u.cache_creation_input_tokens + " cache-write");
+  if (ub.length) html += field("tokens", ub.join(" · "));
+  if (res.model) html += field("model", res.model);
+  if (res.stop_reason) html += field("stop reason", res.stop_reason);
+  if (Array.isArray(res.content) && res.content.length)
+    html += '<div class="field-label">response</div>' + renderContentBlocks(res.content);
+  if (req.system)
+    html += '<details><summary>system prompt</summary><pre>' + esc(systemToText(req.system)) + '</pre></details>';
+  if (Array.isArray(req.messages) && req.messages.length)
+    html += '<details><summary>context (' + req.messages.length + ' messages)</summary>' +
+      renderMessages(req.messages) + '</details>';
+  return html;
+}
+
+function systemToText(sys) {
+  if (typeof sys === "string") return sys;
+  if (Array.isArray(sys)) return sys.map(b => typeof b === "string" ? b : (b.text || "")).join("\n");
+  return JSON.stringify(sys);
+}
+
+function blockText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content.map(b => b.type === "text" ? (b.text || "") : JSON.stringify(b)).join("\n");
+  return JSON.stringify(content || "");
+}
+
+function renderContentBlocks(content) {
+  if (typeof content === "string") return '<pre>' + esc(content) + '</pre>';
+  if (!Array.isArray(content)) return '<pre>' + esc(JSON.stringify(content)) + '</pre>';
+  let html = "";
+  for (const b of content) {
+    if (b.type === "text") html += '<pre>' + esc(b.text || "") + '</pre>';
+    else if (b.type === "thinking")
+      html += '<div class="field-label">thinking</div><pre>' + esc(b.thinking || "") + '</pre>';
+    else if (b.type === "tool_use")
+      html += '<pre class="diff-add">→ tool_use ' + esc(b.name || "") + '\n' +
+        esc(JSON.stringify(b.input || {}, null, 2)) + '</pre>';
+    else if (b.type === "tool_result")
+      html += '<pre>← tool_result\n' + esc(blockText(b.content)) + '</pre>';
+    else if (b.type === "image") html += '<pre>[image]</pre>';
+    else html += '<pre>' + esc(JSON.stringify(b)) + '</pre>';
+  }
+  return html;
+}
+
+function renderMessages(messages) {
+  let html = "";
+  for (const m of messages)
+    html += '<div class="field-label">' + esc(m.role || "?") + '</div>' + renderContentBlocks(m.content);
+  return html;
 }
 
 function renderDiff(path, oldStr, newStr) {
@@ -389,6 +529,8 @@ function startStream() {
 
 // ---- wiring ----
 $("filter").onchange = (e) => { typeFilter = e.target.value; renderTimeline(); };
+$("search").oninput = (e) => { searchTerm = e.target.value.trim().toLowerCase(); renderTimeline(); };
+$("next-error").onclick = jumpToNextError;
 $("follow-toggle").onclick = () => {
   paused = !paused;
   const b = $("follow-toggle");

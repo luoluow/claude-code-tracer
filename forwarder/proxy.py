@@ -16,7 +16,13 @@ import json
 import os
 import ssl
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# One logical session per forwarder run, so a run's API turns group together.
+# (Claude Code sends no session key on API requests, so we can't correlate to
+# the hook session_id; an explicit x-session-id header still wins if present.)
+RUN_ID = time.strftime("api-%Y%m%d_%H%M%S")
 
 PORT = int(os.environ.get("FORWARDER_PORT", "7356"))
 UPSTREAM_HOST = os.environ.get("FORWARDER_UPSTREAM_HOST", "api.anthropic.com")
@@ -57,9 +63,12 @@ class Handler(BaseHTTPRequestHandler):
 
         headers = {
             k: v for k, v in self.headers.items()
-            if k.lower() not in HOP_BY_HOP and k.lower() != "host"
+            if k.lower() not in HOP_BY_HOP and k.lower() not in ("host", "accept-encoding")
         }
         headers["Host"] = UPSTREAM_HOST
+        # Force identity so the SSE we tap is plaintext, not gzip/br. The client
+        # gets an uncompressed response (localhost hop — bandwidth is irrelevant).
+        headers["Accept-Encoding"] = "identity"
 
         if UPSTREAM_TLS:
             conn = http.client.HTTPSConnection(
@@ -72,8 +81,13 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         try:
-            conn.request(method, self.path, body=body, headers=headers)
-            upstream = conn.getresponse()
+            try:
+                conn.request(method, self.path, body=body, headers=headers)
+                upstream = conn.getresponse()
+            except OSError as e:
+                self.send_error(502, "Upstream connection failed")
+                print(f"[forwarder] upstream error: {e}", file=sys.stderr)
+                return
 
             # Mirror status + headers to the client (drop hop-by-hop;
             # let our own connection handling set length/encoding).
@@ -112,11 +126,10 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             req = {}
         response, usage = _reassemble_sse(sse_bytes)
-        session_id = (
-            self.headers.get("x-session-id")
-            or req.get("metadata", {}).get("user_id")
-            or "api"
-        )
+        if not response.get("content") and not usage:
+            print(f"[forwarder] WARNING: empty reassembly; first bytes: {sse_bytes[:80]!r}",
+                  file=sys.stderr)
+        session_id = self.headers.get("x-session-id") or RUN_ID
         event = {
             "session_id": session_id,
             "hook_event_name": "ApiCall",
@@ -133,7 +146,7 @@ def _reassemble_sse(sse_bytes):
     Returns (response, usage) where response mirrors a Messages API result
     (role, model, stop_reason, content blocks) and usage holds token counts.
     """
-    text = sse_bytes.decode("utf-8", "replace")
+    text = sse_bytes.decode("utf-8", "replace").replace("\r\n", "\n")
     response = {"role": "assistant", "content": []}
     usage = {}
     blocks = {}  # index -> {"type": ..., accumulator}

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-kill -9 $(sudo lsof -t -i:7355)
 
 PORT="${FORWARDER_PORT:-7356}"
 
