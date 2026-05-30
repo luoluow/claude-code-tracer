@@ -13,26 +13,29 @@ order, with what inputs, and why.
 ```
 Claude Code CLI
     │
-    ├─── HTTP hooks ──→ Tracer Server (localhost:7355)
-    │                         │
-    │                    ┌────┴────┐
-    │                  JSONL    SSE broadcast
-    │                  (disk)      │
-    │                    └────┬────┘
-    │                    Web UI (served by backend)
-    │
-    └─── (Phase 4) base-URL forwarder → same server
-         captures raw API messages, no cert trust needed
+    ├─── HTTP hooks ──────────────────→ Tracer Server (localhost:7355)
+    │                                         │
+    └─── API calls (ANTHROPIC_BASE_URL) ─────→│ /v1/* proxy ──→ api.anthropic.com
+         no cert trust needed                 │   (taps SSE → ApiCall, in-process)
+                                              │
+                                         ┌────┴────┐
+                                       JSONL    SSE broadcast
+                                       (disk)      │
+                                         └────┬────┘
+                                       Web UI (served by the same server)
 ```
+
+One process, one port: hooks sink, API proxy, JSONL storage, SSE, and the web UI
+all live in `tracer/server.py`.
 
 ## Decisions
 
 | Dimension    | Decision                                                              |
 | ------------ | --------------------------------------------------------------------- |
 | Backend      | FastAPI + uvicorn, local                                              |
-| Storage      | Per-session JSONL in `~/.claude-tracer/` (no SQL)                     |
+| Storage      | Per-session JSONL in `temp/logs/` (`$TRACER_LOG_DIR`, no SQL)          |
 | Frontend     | Single-file vanilla JS + SSE, served by backend; flat-stream timeline |
-| API capture  | Phase 4 base-URL forwarder (no mitmproxy, no cert trust)              |
+| API capture  | In-process `/v1/*` proxy on the same server (no mitmproxy, no cert trust) |
 | Live updates | In-memory broadcast → SSE                                             |
 
 ### Why JSONL, not SQL
@@ -52,13 +55,15 @@ often also requires `NODE_EXTRA_CA_CERTS`, not just the system trust store. A
 forwarder pointed at via `ANTHROPIC_BASE_URL` avoids all of it:
 
 ```
-Claude Code ──plain HTTP──▶ localhost forwarder ──normal HTTPS──▶ api.anthropic.com
+Claude Code ──plain HTTP──▶ localhost tracer ──normal HTTPS──▶ api.anthropic.com
             (no cert)                            (validates real cert normally)
 ```
 
-The client→forwarder hop is plain HTTP (no cert at all); the forwarder→API hop is a
-normal outbound HTTPS request. Tradeoff: we write a small streaming reverse proxy
-(handling SSE passthrough) instead of getting mitmproxy's machinery for free.
+The client→server hop is plain HTTP (no cert at all); the server→API hop is a normal
+outbound HTTPS request. Tradeoff: we write a small streaming reverse proxy (handling
+SSE passthrough) instead of getting mitmproxy's machinery for free. This proxy lives
+**in-process** in the tracer server (httpx async streaming) so there is one process
+and one port; the cost is that the live API path shares fate with the UI server.
 
 ## Tech Stack
 
@@ -67,11 +72,12 @@ normal outbound HTTPS request. Tradeoff: we write a small streaming reverse prox
 | Backend  | Python + FastAPI + uvicorn        | WebSocket/SSE support, clean routing; few deps   |
 | Storage  | Per-session JSONL (stdlib)        | Simple, greppable, portable, no schema           |
 | Frontend | Single HTML file, vanilla JS + SSE| Zero build step, no npm, served by backend        |
-| Forwarder| stdlib / small async HTTP (Phase 4)| Plain-HTTP in, HTTPS out; no cert trust          |
+| API proxy| httpx async streaming, in the FastAPI app | Plain-HTTP in, HTTPS out; no cert trust; one port |
 
 ## Storage
 
-Per-session JSONL files in `~/.claude-tracer/`, keyed by `session_id`. Each line is
+Per-session JSONL files in `temp/logs/` (override with `TRACER_LOG_DIR`), keyed by
+`session_id`. Each line is
 one event (the hook payload plus an injected timestamp). The tracer server is the
 single writer process; it routes each incoming event to the right per-session file by
 `session_id`.
@@ -85,7 +91,7 @@ The UI shows two tiers of richness depending on what is running:
 
 - **Hook-only (Phases 2–3):** what Claude *did* — the tool layer. Prompts, tool
   calls, results, stop reasons. Great for troubleshooting behavior.
-- **Forwarder on (Phase 4):** additionally what Claude *saw and thought* — system
+- **API proxy on (Phase 4):** additionally what Claude *saw and thought* — system
   prompt, full context, reasoning text, token counts. Great for learning *why*.
 
 ## UI Design
@@ -156,7 +162,7 @@ The value is in rendering each event type usefully, not dumping JSON:
 | PreTool Read      | file path + line range                                          |
 | PreTool Task      | subagent prompt + agent type (later: nest the subagent's events)|
 | Stop              | stop reason — where and why the turn ended                      |
-| *(forwarder)*     | system prompt, full message context, token counts, reasoning   |
+| *(ApiCall)*       | system prompt, full message context, token counts, reasoning   |
 
 ### What you can DO — tagged by purpose
 
@@ -176,7 +182,7 @@ per-type rendering (incl. Edit diffs), Pre/Post pairing, live follow, basic type
 filter. That alone is a genuinely useful tracer.
 
 **Later:** turn grouping, timing, error-jump, search, session diff, subagent nesting,
-and the whole forwarder tier. All additive — none require rework of the MVP.
+and the whole API-proxy tier. All additive — none require rework of the MVP.
 
 ## Phases
 
@@ -201,12 +207,19 @@ and the whole forwarder tier. All additive — none require rework of the MVP.
 - Single-file `static/index.html` served by the backend
 - Flat timeline, sessions list, inspector, Pre/Post pairing, live follow, type filter
 
-### Phase 4 — base-URL forwarder (optional, deep visibility)
+### Phase 4 — Anthropic API proxy (optional, deep visibility)
 
-- Small streaming reverse proxy; point `ANTHROPIC_BASE_URL` at it
-- Reassembles streaming SSE into complete turns
-- Writes `ApiCall` lines into the same per-session JSONL
-- Adds a "Conversation" tab in the UI (prompt/response pairs, tokens)
+- In-process `/v1/*` proxy in the tracer server; point `ANTHROPIC_BASE_URL` at
+  `http://127.0.0.1:7355`. Forwards over HTTPS to api.anthropic.com.
+- Forces `Accept-Encoding: identity` so the tapped SSE is plaintext (gzip/br would
+  otherwise be unparseable).
+- Reassembles streaming SSE into complete turns; records `ApiCall` events in-process
+  (no loopback hop), grouped per server run as `api-<timestamp>`.
+- Rendered inline in the timeline/inspector (system prompt, context, response,
+  tokens) — not a separate tab.
+
+> Originally built as a standalone forwarder on `:7356`, later merged into the tracer
+> server (single process, single port) — see the architecture overview above.
 
 ### Phase 5 — Analysis (optional)
 

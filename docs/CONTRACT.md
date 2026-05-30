@@ -43,8 +43,8 @@ highlights errors (e.g. non-zero exit, `FAIL`, `error`).
 
 ## 2. JSONL storage format
 
-- One directory: `~/.claude-tracer/`
-- One file per session: `~/.claude-tracer/{session_id}.jsonl`
+- One directory: `temp/logs/` under the project root (override with `TRACER_LOG_DIR`)
+- One file per session: `{TRACER_LOG_DIR}/{session_id}.jsonl`
 - One event per line, exactly the JSON object from §1 (compact, no pretty-print).
 - The tracer server is the **single writer**; it routes each incoming event to the
   file named by its `session_id`. If `session_id` is missing, use `"unknown"`.
@@ -97,6 +97,15 @@ Returns the raw JSONL file as `text/plain` (for download).
 
 ### `GET /`
 Serves `static/index.html`. Static assets served from `static/`.
+
+### `ANY /v1/{path}` — Anthropic API proxy (merged forwarder)
+Claude Code points `ANTHROPIC_BASE_URL` at this server. Any `/v1/*` request is
+streamed to `ANTHROPIC_UPSTREAM_URL` (default `https://api.anthropic.com`) and the
+response is streamed straight back. `Accept-Encoding` is forced to `identity` so the
+tapped SSE is plaintext. On a streaming POST, the server reassembles the SSE into a
+final turn and records one `ApiCall` event (§1) **in-process** — grouped per server
+run as `api-<timestamp>`, or by an `x-session-id` request header if present. The
+client→server hop is plain HTTP (no cert); the server→API hop is normal HTTPS.
 
 ## 4. SSE envelope — concrete example
 

@@ -4,16 +4,24 @@ broadcasts via SSE, serves the web UI."""
 
 import asyncio
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 PORT = 7355
-LOG_DIR = Path.home() / ".claude-tracer"
+# Where per-session JSONL is written. Override with TRACER_LOG_DIR; defaults to
+# temp/logs under the project root.
+LOG_DIR = Path(
+    os.environ.get("TRACER_LOG_DIR")
+    or Path(__file__).resolve().parent.parent / "temp" / "logs"
+)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 C = {
@@ -29,25 +37,36 @@ C = {
 
 subscribers: set[asyncio.Queue] = set()
 
+# Anthropic API proxy (merged forwarder). Claude Code points ANTHROPIC_BASE_URL
+# at this server; /v1/* is streamed to the real API and tapped for ApiCall events.
+# One logical session per server run groups its API turns (x-session-id wins).
+RUN_ID = time.strftime("api-%Y%m%d_%H%M%S")
+UPSTREAM_URL = os.environ.get("ANTHROPIC_UPSTREAM_URL", "https://api.anthropic.com")
+HOP_BY_HOP = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+}
+
 app = FastAPI()
+_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+
+
+async def record_event(event):
+    """Inject a timestamp, append to the session's JSONL, print, and broadcast."""
+    event["_ts"] = datetime.now().isoformat()
+    session_id = event.get("session_id") or "unknown"
+    line = json.dumps(event, separators=(",", ":"))
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG_DIR / f"{session_id}.jsonl", "a") as f:
+        f.write(line + "\n")
+    _print_event(event)
+    for q in subscribers:
+        q.put_nowait(line)
 
 
 @app.post("/event")
 async def post_event(request: Request):
-    event = await request.json()
-    event["_ts"] = datetime.now().isoformat()
-
-    session_id = event.get("session_id") or "unknown"
-    line = json.dumps(event, separators=(",", ":"))
-    LOG_DIR.mkdir(exist_ok=True)
-    with open(LOG_DIR / f"{session_id}.jsonl", "a") as f:
-        f.write(line + "\n")
-
-    _print_event(event)
-
-    for q in subscribers:
-        q.put_nowait(line)
-
+    await record_event(await request.json())
     return {}
 
 
@@ -154,10 +173,150 @@ def _clip(s, n=120):
     return (s[:n] + "…") if len(s) > n else s
 
 
+# --- Anthropic API proxy (merged forwarder) -------------------------------
+
+@app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_anthropic(path: str, request: Request):
+    """Stream a Claude Code API request to the real API, tapping SSE for ApiCall."""
+    body = await request.body()
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in HOP_BY_HOP
+        and k.lower() not in ("host", "accept-encoding", "content-length")
+    }
+    # Force identity so the SSE we tap is plaintext, not gzip/br. The client gets
+    # an uncompressed response over the localhost hop — bandwidth is irrelevant.
+    headers["Accept-Encoding"] = "identity"
+
+    url = httpx.URL(UPSTREAM_URL).join("/v1/" + path)
+    if request.url.query:
+        url = url.copy_with(query=request.url.query.encode())
+
+    upstream_req = _client.build_request(request.method, url, headers=headers, content=body)
+    try:
+        upstream = await _client.send(upstream_req, stream=True)
+    except httpx.HTTPError as e:
+        print(f"[tracer] upstream error: {e}")
+        return Response("Upstream connection failed", status_code=502)
+
+    is_sse = "text/event-stream" in upstream.headers.get("content-type", "")
+    tap = bytearray()
+
+    async def body_stream():
+        try:
+            async for chunk in upstream.aiter_raw():
+                if is_sse:
+                    tap.extend(chunk)
+                yield chunk
+        finally:
+            await upstream.aclose()
+            if request.method == "POST" and is_sse and tap:
+                await _record_apicall(request, body, bytes(tap))
+
+    resp_headers = {
+        k: v for k, v in upstream.headers.items()
+        if k.lower() not in HOP_BY_HOP
+        and k.lower() not in ("content-length", "content-encoding")
+    }
+    return StreamingResponse(body_stream(), status_code=upstream.status_code,
+                             headers=resp_headers)
+
+
+async def _record_apicall(request, request_body, sse_bytes):
+    try:
+        req = json.loads(request_body or b"{}")
+    except ValueError:
+        req = {}
+    response, usage = _reassemble_sse(sse_bytes)
+    if not response.get("content") and not usage:
+        print(f"[tracer] WARNING: empty reassembly; first bytes: {sse_bytes[:80]!r}")
+    await record_event({
+        "session_id": request.headers.get("x-session-id") or RUN_ID,
+        "hook_event_name": "ApiCall",
+        "request": req,
+        "response": response,
+        "usage": usage,
+    })
+
+
+def _reassemble_sse(sse_bytes):
+    """Rebuild the final assistant turn from an Anthropic SSE stream.
+
+    Returns (response, usage) where response mirrors a Messages API result
+    (role, model, stop_reason, content blocks) and usage holds token counts.
+    """
+    text = sse_bytes.decode("utf-8", "replace").replace("\r\n", "\n")
+    response = {"role": "assistant", "content": []}
+    usage = {}
+    blocks = {}  # index -> {"type": ..., accumulator}
+
+    for raw in text.split("\n\n"):
+        data = None
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            evt = json.loads(data)
+        except ValueError:
+            continue
+
+        etype = evt.get("type")
+        if etype == "message_start":
+            msg = evt.get("message", {})
+            response["id"] = msg.get("id")
+            response["model"] = msg.get("model")
+            response["role"] = msg.get("role", "assistant")
+            usage.update(msg.get("usage", {}))
+        elif etype == "content_block_start":
+            blocks[evt["index"]] = dict(evt.get("content_block", {}))
+            blocks[evt["index"]].setdefault("_text", "")
+            blocks[evt["index"]].setdefault("_json", "")
+        elif etype == "content_block_delta":
+            blk = blocks.setdefault(evt["index"], {"_text": "", "_json": ""})
+            d = evt.get("delta", {})
+            if d.get("type") == "text_delta":
+                blk["_text"] += d.get("text", "")
+            elif d.get("type") == "thinking_delta":
+                blk["_text"] += d.get("thinking", "")
+            elif d.get("type") == "input_json_delta":
+                blk["_json"] += d.get("partial_json", "")
+        elif etype == "message_delta":
+            delta = evt.get("delta", {})
+            if "stop_reason" in delta:
+                response["stop_reason"] = delta["stop_reason"]
+            if "stop_sequence" in delta:
+                response["stop_sequence"] = delta["stop_sequence"]
+            usage.update(evt.get("usage", {}))
+
+    for idx in sorted(blocks):
+        response["content"].append(_finalize_block(blocks[idx]))
+    return response, usage
+
+
+def _finalize_block(blk):
+    btype = blk.get("type")
+    if btype in ("text", "thinking"):
+        out = {"type": btype}
+        out["thinking" if btype == "thinking" else "text"] = blk["_text"]
+        return out
+    if btype == "tool_use":
+        out = {"type": "tool_use", "id": blk.get("id"), "name": blk.get("name")}
+        try:
+            out["input"] = json.loads(blk["_json"]) if blk["_json"] else {}
+        except ValueError:
+            out["input"] = {"_raw": blk["_json"]}
+        return out
+    return {k: v for k, v in blk.items() if not k.startswith("_")}
+
+
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
 if __name__ == "__main__":
     R, B = C["RESET"], C["BOLD"]
-    print(f"{B}Claude Code Tracer{R}  —  http://127.0.0.1:{PORT}\n")
+    print(f"{B}Claude Code Tracer{R}  —  http://127.0.0.1:{PORT}")
+    print(f"  UI + hooks + API proxy on one port. To capture API calls:")
+    print(f"  export ANTHROPIC_BASE_URL=http://127.0.0.1:{PORT}\n")
     uvicorn.run(app, host="127.0.0.1", port=PORT)

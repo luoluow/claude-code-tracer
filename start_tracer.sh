@@ -2,4 +2,7 @@
 DATE=$(date +"%Y%m%d%H%M")
 
 cd "$(dirname "$0")"
-./tracer/start.sh > temp/tracer_$DATE.log 2>&1 &
+
+export TRACER_LOG_DIR="${TRACER_LOG_DIR:-$PWD/temp/logs}"
+mkdir -p "$TRACER_LOG_DIR"
+./tracer/start.sh > "$TRACER_LOG_DIR/tracer_$DATE.log" 2>&1 &

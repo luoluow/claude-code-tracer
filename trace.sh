@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Claude Code Tracer — one-command launcher.
 #
-# Configures Claude Code hooks, starts the tracer server + API forwarder, then
-# runs Claude Code with its API traffic routed through the forwarder. The
-# servers are torn down automatically when Claude Code exits.
+# Configures Claude Code hooks, starts the tracer server (UI + hooks + API
+# proxy on one port), then runs Claude Code with its API traffic routed through
+# it. The server is torn down automatically when Claude Code exits.
 #
 #   ./trace.sh [claude args...]
 set -euo pipefail
@@ -11,14 +11,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 TRACER_PORT=7355
-FORWARDER_PORT="${FORWARDER_PORT:-7356}"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 DATE=$(date +"%Y%m%d%H%M")
 
-mkdir -p temp
+# Where session JSONL and the server stdout logs are written. The tracer server
+# reads the same TRACER_LOG_DIR, so they always agree.
+export TRACER_LOG_DIR="${TRACER_LOG_DIR:-$PWD/temp/logs}"
+mkdir -p "$TRACER_LOG_DIR"
 
 # 1. Dependencies ----------------------------------------------------------
-if ! python3 -c 'import fastapi, uvicorn' 2>/dev/null; then
+if ! python3 -c 'import fastapi, uvicorn, httpx' 2>/dev/null; then
   echo "Installing Python dependencies..."
   python3 -m pip install -q -r requirements.txt
 fi
@@ -53,15 +55,12 @@ settings_path.write_text(json.dumps(current, indent=2) + "\n")
 print(f"Tracer hooks {'added to' if added else 'already present in'} {settings_path}")
 PY
 
-# 3. Start tracer server + forwarder, tear down on exit --------------------
-./tracer/start.sh    > "temp/tracer_$DATE.log"    2>&1 &
+# 3. Start the tracer server (UI + hooks + API proxy), tear down on exit ---
+./tracer/start.sh > "$TRACER_LOG_DIR/tracer_$DATE.log" 2>&1 &
 TRACER_PID=$!
-./forwarder/start.sh > "temp/forwarder_$DATE.log" 2>&1 &
-FWD_PID=$!
-trap 'echo; echo "Stopping tracer + forwarder..."; kill "$TRACER_PID" "$FWD_PID" 2>/dev/null || true' EXIT
+trap 'echo; echo "Stopping tracer..."; kill "$TRACER_PID" 2>/dev/null || true' EXIT
 
-# Wait for both to accept connections (TCP probe only — an HTTP request to the
-# forwarder would be relayed to the real API).
+# Wait for the server to accept connections (TCP probe only).
 wait_port() {
   for _ in $(seq 1 50); do
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0
@@ -69,13 +68,11 @@ wait_port() {
   done
   return 1
 }
-wait_port "$TRACER_PORT"    || { echo "Tracer failed to start — see temp/tracer_$DATE.log" >&2; exit 1; }
-wait_port "$FORWARDER_PORT" || { echo "Forwarder failed to start — see temp/forwarder_$DATE.log" >&2; exit 1; }
+wait_port "$TRACER_PORT" || { echo "Tracer failed to start — see $TRACER_LOG_DIR/tracer_$DATE.log" >&2; exit 1; }
 
-# 4. Run Claude Code through the forwarder ---------------------------------
-export ANTHROPIC_BASE_URL="http://127.0.0.1:${FORWARDER_PORT}"
-echo "Tracer UI:  http://127.0.0.1:${TRACER_PORT}"
-echo "Forwarder:  ${ANTHROPIC_BASE_URL}"
-echo "Logs:       temp/tracer_$DATE.log, temp/forwarder_$DATE.log"
+# 4. Run Claude Code routed through the in-process API proxy ---------------
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${TRACER_PORT}"
+echo "Tracer UI + API proxy:  http://127.0.0.1:${TRACER_PORT}"
+echo "Logs:                   $TRACER_LOG_DIR/"
 echo
 claude "$@"

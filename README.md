@@ -33,8 +33,11 @@ What `trace.sh` does:
 2. Merges the tracer hooks into `~/.claude/settings.json` (idempotent; backs the
    original up to `settings.json.bak` once). Override the target with
    `CLAUDE_SETTINGS=/path/to/settings.json`.
-3. Starts the tracer server (`:7355`) and forwarder (`:7356`), logging to `temp/`.
+3. Starts the tracer server (`:7355`) and forwarder (`:7356`).
 4. Exports `ANTHROPIC_BASE_URL` at the forwarder and runs `claude`.
+
+Session JSONL and server logs are written to `temp/logs/` under the project root
+(gitignored). Override the location with `TRACER_LOG_DIR=/path/to/logs`.
 
 ### Running the pieces separately
 

@@ -7,10 +7,15 @@ Usage:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
-LOG_DIR = Path.home() / ".claude-tracer"
+# Mirror server.py: override with TRACER_LOG_DIR, else temp/logs under the project root.
+LOG_DIR = Path(
+    os.environ.get("TRACER_LOG_DIR")
+    or Path(__file__).resolve().parent.parent / "temp" / "logs"
+)
 
 C = {
     "PreToolUse":       "\033[33m",
