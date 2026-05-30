@@ -4,7 +4,7 @@
 # Anthropic upstream, drives it the way Claude Code would (hook POSTs + a streaming
 # /v1 request), and asserts the whole data flow. Exits non-zero on any failure.
 #
-#   ./tracer_claude_code_test/run_e2e.sh
+#   ./tracer_e2e_mock_test/run_e2e.sh
 #
 # Everything lives under this dir; nothing touches your real tracer or temp/logs.
 set -uo pipefail
