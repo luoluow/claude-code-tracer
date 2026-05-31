@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cc-tracer"
+version = "0.1.2"
+description = "A local, infra-free, raw-fidelity inspector for a single Claude Code session — a DevTools Network tab for Claude Code."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["claude", "claude-code", "tracing", "debugging", "observability"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+]
+dependencies = ["fastapi", "uvicorn", "httpx"]
+
+[project.scripts]
+cc-tracer = "cc_tracer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/zhluo/claude-code-tracer"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cc_tracer = ["static/*", "settings_example.json"]

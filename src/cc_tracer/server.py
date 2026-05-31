@@ -10,19 +10,16 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
-import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-PORT = 7355
-# Where per-session JSONL is written. Override with TRACER_LOG_DIR; defaults to
-# temp/logs under the project root.
-LOG_DIR = Path(
-    os.environ.get("TRACER_LOG_DIR")
-    or Path(__file__).resolve().parent.parent / "temp" / "logs"
-)
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+from .config import log_dir
+
+# Per-session JSONL location (honors $TRACER_LOG_DIR; see config.log_dir).
+LOG_DIR = log_dir()
+# The web UI ships inside the package, next to this module.
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 C = {
     "PreToolUse":       "\033[33m",
@@ -37,9 +34,15 @@ C = {
 
 subscribers: set[asyncio.Queue] = set()
 
+# The hook session_id of the most recent hook event. API requests carry no
+# session key, so we attribute each ApiCall to whichever hook session is
+# currently active — exact for a single session, best-effort if several run at
+# once through one proxy.
+active_session = None
+
 # Anthropic API proxy (merged forwarder). Claude Code points ANTHROPIC_BASE_URL
 # at this server; /v1/* is streamed to the real API and tapped for ApiCall events.
-# One logical session per server run groups its API turns (x-session-id wins).
+# ApiCall grouping: x-session-id header → active hook session → api-<run> fallback.
 RUN_ID = time.strftime("api-%Y%m%d_%H%M%S")
 UPSTREAM_URL = os.environ.get("ANTHROPIC_UPSTREAM_URL", "https://api.anthropic.com")
 HOP_BY_HOP = {
@@ -66,7 +69,12 @@ async def record_event(event):
 
 @app.post("/event")
 async def post_event(request: Request):
-    await record_event(await request.json())
+    event = await request.json()
+    sid = event.get("session_id")
+    if sid and not sid.startswith("api-"):
+        global active_session
+        active_session = sid          # track the live hook session for ApiCall attribution
+    await record_event(event)
     return {}
 
 
@@ -231,7 +239,7 @@ async def _record_apicall(request, request_body, sse_bytes):
     if not response.get("content") and not usage:
         print(f"[tracer] WARNING: empty reassembly; first bytes: {sse_bytes[:80]!r}")
     await record_event({
-        "session_id": request.headers.get("x-session-id") or RUN_ID,
+        "session_id": request.headers.get("x-session-id") or active_session or RUN_ID,
         "hook_event_name": "ApiCall",
         "request": req,
         "response": response,
@@ -311,12 +319,4 @@ def _finalize_block(blk):
     return {k: v for k, v in blk.items() if not k.startswith("_")}
 
 
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
-
-
-if __name__ == "__main__":
-    R, B = C["RESET"], C["BOLD"]
-    print(f"{B}Claude Code Tracer{R}  —  http://127.0.0.1:{PORT}")
-    print(f"  UI + hooks + API proxy on one port. To capture API calls:")
-    print(f"  export ANTHROPIC_BASE_URL=http://127.0.0.1:{PORT}\n")
-    uvicorn.run(app, host="127.0.0.1", port=PORT)
+app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

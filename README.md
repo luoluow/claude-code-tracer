@@ -1,56 +1,70 @@
-# Claude Code Tracer
+# cc-tracer (For Claude Code)
 
-This project is to build a simple local tracer for claude code for learning, debugging and trouble-shooting purpose.
+A local, infra-free, raw-fidelity inspector for a **single** Claude Code session — a
+*DevTools Network tab for Claude Code*. Install it, point Claude Code at it, and watch
+one session's hook events and raw API turns on a live timeline.
 
 ## How it captures
 
-Two tiers, so you can run either or both:
+A local FastAPI server (127.0.0.1:7355) with Two capture tiers:
 
 - **Hook tier** — Claude Code hooks POST to the tracer server. Captures *what Claude
   did*: prompts, Pre/PostToolUse, results, stop reasons.
-- **Forwarder tier** — point `ANTHROPIC_BASE_URL` at the local proxy (plain HTTP in,
-  real HTTPS out — no cert trust needed). Taps and reassembles the streaming response
-  into full API turns: system prompt, message context, reasoning text, token usage —
-  *what Claude saw and thought*.
+- **API-proxy tier** — point `ANTHROPIC_BASE_URL` at the tracer; it streams `/v1/*` to
+  the real API (plain HTTP in, real HTTPS out — no cert trust needed) and reassembles
+  the streaming response into full API turns: system prompt, message context, reasoning
+  text, token usage — *what Claude saw and thought*.
 
 ## Getting started
 
-Prerequisites: `python3`, `pip`, and the `claude` CLI on your `PATH`.
+Prerequisites: `python3` (3.9+), `pip`, and the `claude` CLI on your `PATH`.
 
-One command does everything — installs deps, configures the Claude Code hooks,
-starts the tracer server + forwarder, and launches Claude Code routed through them:
-
-```bash
-./trace.sh
-```
-
-Then open the tracer UI at <http://127.0.0.1:7355> and use Claude Code as usual. When
-you quit Claude Code, the tracer and forwarder shut down automatically.
-
-What `trace.sh` does:
-
-1. Installs `requirements.txt` if FastAPI/uvicorn are missing.
-2. Merges the tracer hooks into `~/.claude/settings.json` (idempotent; backs the
-   original up to `settings.json.bak` once). Override the target with
-   `CLAUDE_SETTINGS=/path/to/settings.json`.
-3. Starts the tracer server (`:7355`) and forwarder (`:7356`).
-4. Exports `ANTHROPIC_BASE_URL` at the forwarder and runs `claude`.
-
-Session JSONL and server logs are written to `temp/logs/` under the project root
-(gitignored). Override the location with `TRACER_LOG_DIR=/path/to/logs`.
-
-### Running the pieces separately
-
-The hooks stay configured after `trace.sh` exits, so the tracer keeps capturing the
-tool tier whenever its server is running. To run parts by hand:
+Install the package, then let one command do everything — configure the Claude Code
+hooks, start the tracer server, and launch Claude Code routed through it:
 
 ```bash
-./start_tracer.sh           # tracer server only (hook tier + UI)
-./start_forwarder.sh        # API forwarder only
-./start_claude_traced.sh    # launch Claude Code through an already-running forwarder
+pip install cc-tracer          # or: pip install -e .   (from a clone)
+cc-tracer start
 ```
 
-To stop tracing entirely, restore `~/.claude/settings.json` from the `.bak` file.
+Then open the tracer UI at <http://127.0.0.1:7355> and use Claude Code as usual. The
+tracer **keeps running after you quit Claude Code** so you can keep browsing the
+capture — run `cc-tracer stop` when you're done.
+
+What `cc-tracer start` does:
+
+1. Merges the tracer hooks into `~/.claude/settings.json` (idempotent; backs the
+   original up to `settings.json.bak` once). Override the target with `--settings PATH`.
+2. Starts a detached tracer server on `:7355` (hook sink + UI + API proxy), or reuses
+   one already running there. The server is left running when Claude exits.
+3. Exports ANTHROPIC_BASE_URL=http://127.0.0.1:7355 and runs `claude` (you can pass claude args after `--`). 
+
+Session JSONL is written to `~/.cc-tracer/logs/` (override with `TRACER_LOG_DIR` or
+`--log-dir`).
+
+For instance:
+```bash
+cc-tracer start \
+  --log-dir ./logs/ \
+  -- -c # -c to continue recent claude session
+```
+
+To run **just the server** without launching Claude — e.g. to browse past captures in
+the UI — use 
+```bash
+cc-tracer start --server-only
+```
+
+### Stopping
+
+```bash
+cc-tracer stop    # stop the server AND remove the tracer's hooks
+```
+
+Hooks follow the server's lifecycle: `start` adds them and `stop` removes only the
+tracer's own entries (your other hooks are left alone). With the server running, you
+can also point a Claude session you launch yourself at it with
+`export ANTHROPIC_BASE_URL=http://127.0.0.1:7355`.
 
 ## When to use this vs. OpenTelemetry
 
@@ -77,7 +91,7 @@ avoids that approach's CA forging and `NODE_EXTRA_CA_CERTS` fuss.
 
 ### Caveats
 
-- **Forwarder ≠ full coverage.** The forwarder only sees HTTP traffic. Transport that
+- **Proxy ≠ full coverage.** The API proxy only sees HTTP traffic. Transport that
   isn't plain HTTP (e.g. the Agent SDK's IPC/WebSocket) is captured only at the hook
   tier. Native OTel emits regardless of transport.
 - **SSE reassembly is schema-coupled.** Rebuilding turns depends on the current

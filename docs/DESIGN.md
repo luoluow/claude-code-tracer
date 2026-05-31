@@ -214,7 +214,9 @@ and the whole API-proxy tier. All additive — none require rework of the MVP.
 - Forces `Accept-Encoding: identity` so the tapped SSE is plaintext (gzip/br would
   otherwise be unparseable).
 - Reassembles streaming SSE into complete turns; records `ApiCall` events in-process
-  (no loopback hop), grouped per server run as `api-<timestamp>`.
+  (no loopback hop), attributed to the **active hook session** so API turns merge into
+  the live session's timeline (x-session-id header wins; `api-<timestamp>` fallback when
+  no hooks run). Exact for one session; best-effort temporal with several at once.
 - Rendered inline in the timeline/inspector (system prompt, context, response,
   tokens) — not a separate tab.
 

@@ -10,7 +10,7 @@
     --muted: #888; --accent: #4ec9b0; --sel: #094771;
     --err: #f48771; --ok: #6a9955; --edit: #c586c0;
     --user: #569cd6; --pre: #dcdcaa; --post: #9cdcfe; --stop: #ce9178; --start: #808080;
-    --api: #d7ba7d;
+    --api: #d7ba7d; --subagent: #4fc1ff; --compact: #b5cea8;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -19,9 +19,13 @@
     background: var(--bg); color: var(--fg); display: flex; overflow: hidden;
   }
   .pane { height: 100vh; overflow-y: auto; }
-  #sessions { width: 220px; border-right: 1px solid var(--border); flex: none; }
-  #timeline-pane { flex: 1; min-width: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  #sessions { width: 220px; flex: none; }
+  #timeline-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   #inspector { width: 420px; flex: none; padding: 12px; }
+  /* draggable dividers between panels */
+  .gutter { flex: none; width: 6px; cursor: col-resize; background: var(--border); }
+  .gutter:hover { background: var(--accent); }
+  .pane.hidden, .gutter.hidden { display: none; }
   .pane-header {
     padding: 8px 10px; font-weight: bold; color: var(--accent);
     border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel);
@@ -67,9 +71,15 @@
   .ev .kind { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ev .preview { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .k-SessionStart .kind { color: var(--start); }
+  .k-SessionEnd .kind { color: var(--start); }
   .k-UserPromptSubmit .kind { color: var(--user); }
   .k-PreToolUse .kind { color: var(--pre); }
   .k-PostToolUse .kind { color: var(--post); }
+  .k-PostToolUseFailure .kind { color: var(--err); }
+  .k-SubagentStart .kind { color: var(--subagent); }
+  .k-SubagentStop .kind { color: var(--subagent); }
+  .k-PreCompact .kind { color: var(--compact); }
+  .k-PostCompact .kind { color: var(--compact); }
   .k-Stop .kind { color: var(--stop); }
   .k-ApiCall .kind { color: var(--api); }
   .mark-err { color: var(--err); font-weight: bold; }
@@ -97,8 +107,11 @@
     <div id="sessions-list"></div>
   </div>
 
+  <div class="gutter" id="gutter-left" title="Drag to resize"></div>
+
   <div id="timeline-pane" class="pane" style="overflow:hidden;">
     <div id="timeline-controls">
+      <button id="toggle-sessions" title="Show/hide sessions panel">☰</button>
       <span class="title" id="timeline-title">Timeline</span>
       <span id="live-indicator"></span>
       <select id="filter"><option value="">all types</option></select>
@@ -108,6 +121,8 @@
     </div>
     <div id="timeline"><div class="empty">Select a session</div></div>
   </div>
+
+  <div class="gutter" id="gutter-right" title="Drag to resize"></div>
 
   <div id="inspector" class="pane">
     <div class="pane-header" style="margin:-12px -12px 12px;">INSPECTOR</div>
@@ -144,9 +159,12 @@ function responseIsError(resp) {
 function eventHaystack(e) {
   const ti = e.tool_input || {};
   const parts = [e.hook_event_name, e.tool_name, e.prompt, e.stop_reason,
-                 ti.command, ti.file_path, ti.subagent_type, ti.prompt];
+                 ti.command, ti.file_path, ti.subagent_type, ti.prompt,
+                 e.agent_type, e.reason, e.trigger, e.summary];
   if (e.tool_response != null)
     parts.push(typeof e.tool_response === "string" ? e.tool_response : JSON.stringify(e.tool_response));
+  if (e.error != null)
+    parts.push(typeof e.error === "string" ? e.error : JSON.stringify(e.error));
   if (e.hook_event_name === "ApiCall" && e.response) {
     parts.push(e.response.model, e.response.stop_reason);
     if (Array.isArray(e.response.content))
@@ -289,6 +307,21 @@ function eventPreview(e) {
       return esc((s || "").replace(/\s+/g, " ").slice(0, 120));
     }
     case "Stop": return esc(e.stop_reason || "");
+    case "SessionEnd": return esc(e.reason || e.source || "session ended");
+    case "PostToolUseFailure": {
+      const r = e.tool_response ?? e.error;
+      const s = (typeof r === "string") ? r : JSON.stringify(r);
+      return esc((s || "failed").replace(/\s+/g, " ").slice(0, 120));
+    }
+    case "SubagentStart": return "agent " + esc(e.agent_type || e.subagent_type || "?");
+    case "SubagentStop":
+      return esc(e.agent_type || e.subagent_type || "subagent") + " · " + esc(e.stop_reason || "done");
+    case "PreCompact": return "trigger " + esc(e.trigger || e.matcher || "?");
+    case "PostCompact": {
+      const sum = e.summary || e.additionalContext || "";
+      return "trigger " + esc(e.trigger || "?") +
+        (sum ? ' — "' + esc(String(sum).slice(0, 80)) + '"' : "");
+    }
     case "ApiCall": {
       const r = e.response || {}, u = e.usage || {};
       const txt = (Array.isArray(r.content) ? r.content : [])
@@ -306,6 +339,9 @@ function eventPreview(e) {
 function rowKind(e) {
   if (e.hook_event_name === "PreToolUse") return "PreTool " + esc(e.tool_name || "");
   if (e.hook_event_name === "PostToolUse") return "PostTool " + esc(e.tool_name || "");
+  if (e.hook_event_name === "PostToolUseFailure") return "PostToolFail " + esc(e.tool_name || "");
+  if (e.hook_event_name === "SubagentStart") return "SubagentStart " + esc(e.agent_type || e.subagent_type || "");
+  if (e.hook_event_name === "SubagentStop") return "SubagentStop " + esc(e.agent_type || e.subagent_type || "");
   return esc(e.hook_event_name);
 }
 
@@ -315,6 +351,7 @@ function rowMarkers(e) {
     m += ' <span class="mark-err">✗</span>';
   if (e.hook_event_name === "PostToolUse" && !responseIsError(e.tool_response))
     m += ' <span style="color:var(--ok)">✓</span>';
+  if (e.hook_event_name === "PostToolUseFailure") m += ' <span class="mark-err">✗</span>';
   if (e.tool_name === "Edit") m += ' <span class="mark-edit">◆</span>';
   return m;
 }
@@ -407,6 +444,22 @@ function renderByType(e) {
       return field("stop reason", e.stop_reason || "");
     case "SessionStart":
       return field("source", e.source || "") + field("model", e.model || "");
+    case "SessionEnd":
+      return field("reason", e.reason || e.source || "");
+    case "SubagentStart":
+      return field("agent type", e.agent_type || e.subagent_type || "") +
+        (e.agent_id ? field("agent id", e.agent_id) : "") +
+        (e.prompt ? field("prompt", e.prompt) : "");
+    case "SubagentStop":
+      return field("agent type", e.agent_type || e.subagent_type || "") +
+        (e.agent_id ? field("agent id", e.agent_id) : "") +
+        (e.stop_reason ? field("stop reason", e.stop_reason) : "");
+    case "PreCompact":
+      return field("trigger", e.trigger || e.matcher || "");
+    case "PostCompact":
+      return field("trigger", e.trigger || "") +
+        ((e.summary || e.additionalContext)
+          ? field("summary", e.summary || e.additionalContext) : "");
     case "PreToolUse":
       if (e.tool_name === "Bash") return field("command", ti.command || "");
       if (e.tool_name === "Edit") return renderDiff(ti.file_path, ti.old_string, ti.new_string);
@@ -424,6 +477,9 @@ function renderByType(e) {
       return field("tool input", JSON.stringify(ti, null, 2));
     case "PostToolUse":
       return renderResult(e.tool_response);
+    case "PostToolUseFailure":
+      return (e.tool_name ? field("tool", e.tool_name) : "") +
+        renderResult(e.tool_response ?? e.error ?? "tool failed", true);
     case "ApiCall":
       return renderApiCall(e);
     default:
@@ -502,9 +558,9 @@ function renderDiff(path, oldStr, newStr) {
     '<div class="field-label">diff</div><pre>' + lines + '</pre>';
 }
 
-function renderResult(resp) {
+function renderResult(resp, forceErr) {
   const s = (typeof resp === "string") ? resp : JSON.stringify(resp, null, 2);
-  const err = responseIsError(resp);
+  const err = forceErr || responseIsError(resp);
   return '<div class="field-label">result</div>' +
     '<pre' + (err ? ' class="result-err"' : "") + '>' + esc(s) + '</pre>';
 }
@@ -536,6 +592,40 @@ $("follow-toggle").onclick = () => {
   const b = $("follow-toggle");
   b.textContent = paused ? "▶ resume" : "⏸ pause";
   b.classList.toggle("active", paused);
+};
+
+// ---- panel resizing + sessions toggle ----
+// Drag a gutter to resize the fixed-width panel beside it; the timeline (flex:1)
+// absorbs the rest. side="left": panel grows as you drag right; "right": as you drag left.
+function makeResizable(gutter, panel, side) {
+  gutter.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = panel.getBoundingClientRect().width;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX;
+      let w = side === "left" ? startW + dx : startW - dx;
+      w = Math.max(140, Math.min(window.innerWidth - 200, w));
+      panel.style.width = w + "px";
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+makeResizable($("gutter-left"), $("sessions"), "left");
+makeResizable($("gutter-right"), $("inspector"), "right");
+
+$("toggle-sessions").onclick = () => {
+  $("sessions").classList.toggle("hidden");
+  $("gutter-left").classList.toggle("hidden");
 };
 
 loadSessions();

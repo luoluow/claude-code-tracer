@@ -103,9 +103,14 @@ Claude Code points `ANTHROPIC_BASE_URL` at this server. Any `/v1/*` request is
 streamed to `ANTHROPIC_UPSTREAM_URL` (default `https://api.anthropic.com`) and the
 response is streamed straight back. `Accept-Encoding` is forced to `identity` so the
 tapped SSE is plaintext. On a streaming POST, the server reassembles the SSE into a
-final turn and records one `ApiCall` event (§1) **in-process** — grouped per server
-run as `api-<timestamp>`, or by an `x-session-id` request header if present. The
-client→server hop is plain HTTP (no cert); the server→API hop is normal HTTPS.
+final turn and records one `ApiCall` event (§1) **in-process**. Session attribution,
+in order: an `x-session-id` request header if present → the **active hook session**
+(the `session_id` of the most recent hook event, so API turns merge into the live
+session) → an `api-<timestamp>` fallback when no hooks are running. The client→server
+hop is plain HTTP (no cert); the server→API hop is normal HTTPS.
+
+> The active-session attribution is exact for a single session; with several
+> sessions sharing one proxy it is best-effort (temporal) and may misattribute.
 
 ## 4. SSE envelope — concrete example
 

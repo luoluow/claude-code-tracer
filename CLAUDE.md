@@ -11,25 +11,27 @@ comparison.
 
 ## Architecture
 
-**One process, one port (`127.0.0.1:7355`).** `tracer/server.py` is a FastAPI app
+**One process, one port (`127.0.0.1:7355`).** `src/cc_tracer/server.py` is a FastAPI app
 that is simultaneously the hooks sink, the Anthropic API proxy, the JSONL store, the
 SSE broadcaster, and the web-UI host. There is no separate forwarder process anymore —
 it was merged into the server (older docs/commits may still mention `:7356`).
 
-Capture happens in **two tiers**, either or both can run:
+Capture happens in **two tiers**:
 
 - **Hook tier** — Claude Code hooks POST to `/event`. Captures *what Claude did*:
-  prompts, Pre/PostToolUse, results, stop reasons. Enabled via `settings.json` hooks.
+  prompts, Pre/PostToolUse, results, stop reasons. `start` installs the `settings.json`
+  hooks (if absent) and `stop` removes them.
 - **API-proxy tier** — Claude Code points `ANTHROPIC_BASE_URL` at the server; `/v1/*`
   is streamed through to the real API (plain HTTP in, real HTTPS out, no cert trust),
   and the SSE stream is tapped and reassembled into one `ApiCall` event per turn.
   Captures *what Claude saw and thought*: system prompt, context, reasoning, tokens.
 
 Data flow: every event (hook payload or reassembled `ApiCall`) gets an injected `_ts`,
-is appended as one compact line to `temp/logs/{session_id}.jsonl` (the server is the
-single writer), printed to the server's terminal, and pushed to all `/stream` SSE
-subscribers. The UI (`static/index.html`, single-file vanilla JS) renders a flat
-chronological timeline and reads `/sessions`, `/events/{id}`, `/stream`.
+is appended as one compact line to `~/.cc-tracer/logs/{session_id}.jsonl` (override with
+`$TRACER_LOG_DIR`; the server is the single writer), printed to the server's terminal,
+and pushed to all `/stream` SSE subscribers. The UI (`src/cc_tracer/static/index.html`,
+single-file vanilla JS) renders a flat chronological timeline and reads `/sessions`,
+`/events/{id}`, `/stream`.
 
 ### Key invariant: never block or break the traced session
 
@@ -55,36 +57,50 @@ built against it. `docs/DESIGN.md` holds the full design, rationale, and phase p
 
 ## Commands
 
+Installed as a package (`pyproject.toml`); the `cc-tracer` console command is
+`cc_tracer.cli:main`. The package layout is `src/cc_tracer/` (server, view, cli, hooks,
+config, plus `static/` and `settings_example.json` as package data).
+
 ```bash
-# One command: install deps, configure hooks, start server, run Claude through it.
-./trace.sh [claude args...]          # tears the server down on exit; UI at :7355
+pip install -e .                     # install the cc-tracer CLI (editable, for dev)
 
-# Run pieces by hand:
-./start_tracer.sh                    # server only (hook tier + UI + proxy), backgrounded
-./start_claude_traced.sh [args...]   # launch Claude routed through an already-running server
-python3 tracer/server.py             # server in the foreground (what start.sh execs)
+# The whole thing: install hooks (if needed), start a detached server, run Claude
+# through it. Leaves the server running on exit; UI at :7355.
+cc-tracer start [--port 7355] [--settings PATH] [-- claude args...]
 
-# Terminal viewer for captured JSONL (no UI):
-python3 tracer/view.py list                 # list sessions in TRACER_LOG_DIR
-python3 tracer/view.py show [N] [EventType]  # show session N (default latest), opt. filter
+# Just the server (no Claude) — e.g. to browse past captures in the UI:
+cc-tracer start --server-only
+
+# Tear down: stop the (detached) server AND remove the tracer's hooks.
+cc-tracer stop  [--port 7355] [--settings PATH]
+
+# (Internal: `_serve` is the bare server process that `start` spawns detached.)
+
+# To capture API calls in a Claude session you launch yourself, point it at the
+# already-running server:
+export ANTHROPIC_BASE_URL=http://127.0.0.1:7355
 
 # End-to-end tests, both fully isolated (own ports/log dirs; nothing touches :7355):
 ./tracer_e2e_mock_test/run_e2e.sh        # MOCK upstream, no creds, no billing — default
 ./tracer_e2e_real_test/run_e2e_real.sh   # REAL, BILLED API; runs actual Claude headless
 ```
 
-Dependencies: `fastapi`, `uvicorn`, `httpx` (`requirements.txt`). `trace.sh` installs
-them on demand if missing. `claude` must be on `PATH` for `trace.sh` and the e2e test.
+Dependencies (`fastapi`, `uvicorn`, `httpx`) install with the package. `claude` must be
+on `PATH` for `cc-tracer start` and the real e2e test.
 
 ### Configuration
 
-- `TRACER_LOG_DIR` — where session JSONL + server logs go (default `temp/logs/`,
-  gitignored). The server and the launch scripts read the same value so they agree.
+- `TRACER_LOG_DIR` — where session JSONL + the `cc-tracer-<port>.pid` file go (default
+  `~/.cc-tracer/logs/`), read via `config.log_dir`.
 - `ANTHROPIC_UPSTREAM_URL` — proxy target (default `https://api.anthropic.com`).
-- `CLAUDE_SETTINGS` — which `settings.json` `trace.sh` merges hooks into (default
-  `~/.claude/settings.json`; it backs the original up to `.json.bak` once, idempotently).
-- `settings_example.json` is the canonical hooks block; the proxy reads `x-session-id`
-  to group API turns, falling back to a per-server-run `api-<timestamp>` id.
+- `--settings` (on `start`/`stop`) — which `settings.json` to manage hooks in (default
+  `~/.claude/settings.json`; `start` installs them idempotently and backs the original
+  up to `.json.bak` once, `stop` removes only the tracer's entries).
+  The hook set lives in `cc_tracer/hooks.py` (`EVENTS`); `settings_example.json` is a
+  shipped reference copy.
+- ApiCall session attribution: `x-session-id` header → the active hook session (so API
+  turns merge into the live session) → a per-server-run `api-<timestamp>` fallback when
+  no hooks are running.
 
 ---
 

@@ -27,8 +27,8 @@ cleanup() { kill "${SRV:-}" "${MOCK:-}" 2>/dev/null; }
 trap cleanup EXIT
 
 # --- deps ----------------------------------------------------------------
-if ! "$PY" -c 'import fastapi, uvicorn, httpx' 2>/dev/null; then
-  echo "Missing Python deps. Run: pip install -r requirements.txt" >&2
+if ! "$PY" -c 'import cc_tracer.server, uvicorn' 2>/dev/null; then
+  echo "cc_tracer not importable. Run: pip install -e . (from the repo root)" >&2
   exit 1
 fi
 
@@ -84,7 +84,7 @@ PY
 
 # --- 2. start the merged tracer (isolated logs, pointed at the mock) ------
 TRACER_LOG_DIR="$WORK/sessions" ANTHROPIC_UPSTREAM_URL="http://127.0.0.1:${MOCK_PORT}" \
-  "$PY" -c "import sys; sys.path.insert(0, '$ROOT/tracer'); import server, uvicorn; uvicorn.run(server.app, host='127.0.0.1', port=${TRACER_PORT})" \
+  "$PY" -c "import cc_tracer.server as server, uvicorn; uvicorn.run(server.app, host='127.0.0.1', port=${TRACER_PORT})" \
   > "$WORK/tracer.log" 2>&1 & SRV=$!
 
 wait_port() {

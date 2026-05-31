@@ -38,8 +38,8 @@ bad() { printf '  \033[31m✗\033[0m %s\n' "$1"; fail=$((fail+1)); }
 
 # --- preconditions -------------------------------------------------------
 command -v claude >/dev/null || { echo "claude not on PATH" >&2; exit 1; }
-"$PY" -c 'import fastapi, uvicorn, httpx' 2>/dev/null \
-  || { echo "Missing deps. Run: pip install -r requirements.txt" >&2; exit 1; }
+"$PY" -c 'import cc_tracer.server, uvicorn' 2>/dev/null \
+  || { echo "cc_tracer not importable. Run: pip install -e . (from the repo root)" >&2; exit 1; }
 
 rm -rf "$WORK"; mkdir -p "$PROJECT/.claude" "$LOGS"
 git init -q "$PROJECT"   # scope claude's workspace to run/project, not the parent repo
@@ -48,18 +48,24 @@ git init -q "$PROJECT"   # scope claude's workspace to run/project, not the pare
 cat > "$PROJECT/.claude/settings.json" <<JSON
 {
   "hooks": {
-    "SessionStart":     [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
-    "PreToolUse":       [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
-    "Stop":             [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }]
+    "SessionStart":       [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "SessionEnd":         [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "PreToolUse":         [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "PostToolUse":        [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "SubagentStart":      [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "SubagentStop":       [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "PreCompact":         [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "PostCompact":        [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }],
+    "Stop":               [{ "hooks": [{ "type": "http", "url": "${BASE}/event" }] }]
   }
 }
 JSON
 
 # --- 2. start an isolated tracer (real upstream), wait for it ------------
 TRACER_LOG_DIR="$LOGS" \
-  "$PY" -c "import sys; sys.path.insert(0, '$ROOT/tracer'); import server, uvicorn; uvicorn.run(server.app, host='127.0.0.1', port=${PORT})" \
+  "$PY" -c "import cc_tracer.server as server, uvicorn; uvicorn.run(server.app, host='127.0.0.1', port=${PORT})" \
   > "$WORK/tracer.log" 2>&1 & SRV=$!
 started=""
 for _ in $(seq 1 50); do (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null && { started=1; break; }; sleep 0.1; done
@@ -93,19 +99,16 @@ assert len(evs) >= 3, f'only {len(evs)} events'
 assert 'UserPromptSubmit' in kinds, kinds
 " 2>/dev/null; then ok "hook events captured for session"; else bad "hook events captured for session"; fi
 
-# B. real API calls captured & reassembled (non-empty response)
-if curl -s "$BASE/sessions" | "$PY" -c "
-import sys, json, urllib.request
-base = '$BASE'
-api = [s['session_id'] for s in json.load(sys.stdin) if s['session_id'].startswith('api-')]
-assert api, 'no api-* session'
-evs = json.load(urllib.request.urlopen(base + '/events/' + api[0]))
+# B. real API calls captured, reassembled, AND merged into the same session
+if curl -s "$BASE/events/$SID" | "$PY" -c "
+import sys, json
+evs = json.load(sys.stdin)
 calls = [e for e in evs if e.get('hook_event_name') == 'ApiCall']
-assert calls, 'no ApiCall events'
+assert calls, 'no ApiCall merged into the hook session'
 populated = [e for e in calls if e.get('response', {}).get('content')]
 assert populated, f'{len(calls)} ApiCalls but none populated'
-print(f'   ({len(populated)}/{len(calls)} ApiCalls populated, model={populated[0][\"response\"].get(\"model\")})')
-" 2>/dev/null; then ok "real API calls captured & reassembled"; else bad "real API calls captured & reassembled"; fi
+print(f'   ({len(populated)}/{len(calls)} ApiCalls merged into session, model={populated[0][\"response\"].get(\"model\")})')
+" 2>/dev/null; then ok "API calls merged into the session & reassembled"; else bad "API calls merged into the session"; fi
 
 # --- report --------------------------------------------------------------
 echo
