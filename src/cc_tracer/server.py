@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code Tracer — FastAPI app: receives hook events, logs to per-session JSONL,
+"""CC Tracer — FastAPI app: receives hook events, logs to per-session JSONL,
 broadcasts via SSE, serves the web UI."""
 
 import asyncio

@@ -94,8 +94,10 @@ on `PATH` for `cc-tracer start` and the real e2e test.
   `~/.cc-tracer/logs/`), read via `config.log_dir`.
 - `ANTHROPIC_UPSTREAM_URL` — proxy target (default `https://api.anthropic.com`).
 - `--settings` (on `start`/`stop`) — which `settings.json` to manage hooks in (default
-  `~/.claude/settings.json`; `start` installs them idempotently and backs the original
-  up to `.json.bak` once, `stop` removes only the tracer's entries).
+  the **project-local** `.claude/settings.json` in the cwd, so hooks scope to this
+  project, not every Claude session; pass `--settings ~/.claude/settings.json` to go
+  global). `start` installs idempotently and backs the original up to `.json.bak` once;
+  `stop` removes only the tracer's entries.
   The hook set lives in `cc_tracer/hooks.py` (`EVENTS`); `settings_example.json` is a
   shipped reference copy.
 - ApiCall session attribution: `x-session-id` header → the active hook session (so API

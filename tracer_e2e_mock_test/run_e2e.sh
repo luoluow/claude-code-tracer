@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test for the Claude Code Tracer — fully isolated, no creds, no real
+# End-to-end test for CC Tracer — fully isolated, no creds, no real
 # API calls. Stands up the merged tracer (UI + hooks + /v1 proxy) against a MOCK
 # Anthropic upstream, drives it the way Claude Code would (hook POSTs + a streaming
 # /v1 request), and asserts the whole data flow. Exits non-zero on any failure.
@@ -106,7 +106,7 @@ post_hook() { curl -s -o /dev/null -X POST "$BASE/event" -H 'Content-Type: appli
 
 # A. UI served at /
 code=$(curl -s -o "$WORK/ui.html" -w '%{http_code}' "$BASE/")
-if [ "$code" = 200 ] && grep -q "Claude Code Tracer" "$WORK/ui.html"; then
+if [ "$code" = 200 ] && grep -q "CC Tracer" "$WORK/ui.html"; then
   ok "UI served at /"
 else
   bad "UI served at / (http $code)"

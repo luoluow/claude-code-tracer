@@ -1,4 +1,4 @@
-# Claude Code Tracer — Design
+# CC Tracer — Design
 
 A simple local tracer for Claude Code, for learning, debugging, and troubleshooting
 Claude Code behavior. This document captures the agreed design.

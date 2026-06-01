@@ -1,12 +1,13 @@
-# cc-tracer (For Claude Code)
+# cc-tracer (Local Tracer for Claude Code)
 
 A local, infra-free, raw-fidelity inspector for a **single** Claude Code session — a
 *DevTools Network tab for Claude Code*. Install it, point Claude Code at it, and watch
-one session's hook events and raw API turns on a live timeline.
-
+one session's hook events and raw API turns on a live timeline like
+![CC Tracer WebUI Example](cc-tracer-webui-example.jpg)
+ 
 ## How it captures
 
-A local FastAPI server (127.0.0.1:7355) with Two capture tiers:
+A local FastAPI server (127.0.0.1:7355) with two capture tiers:
 
 - **Hook tier** — Claude Code hooks POST to the tracer server. Captures *what Claude
   did*: prompts, Pre/PostToolUse, results, stop reasons.
@@ -33,8 +34,10 @@ capture — run `cc-tracer stop` when you're done.
 
 What `cc-tracer start` does:
 
-1. Merges the tracer hooks into `~/.claude/settings.json` (idempotent; backs the
-   original up to `settings.json.bak` once). Override the target with `--settings PATH`.
+1. Adds the tracer hooks into the **project-local** `.claude/settings.json` (in the
+   current directory, so they apply only to this project — not every Claude session;
+   idempotent, backs the original up to `.bak` once). Use `--settings PATH` to target a
+   different file, e.g. `~/.claude/settings.json` to trace globally.
 2. Starts a detached tracer server on `:7355` (hook sink + UI + API proxy), or reuses
    one already running there. The server is left running when Claude exits.
 3. Exports ANTHROPIC_BASE_URL=http://127.0.0.1:7355 and runs `claude` (you can pass claude args after `--`). 
@@ -49,10 +52,13 @@ cc-tracer start \
   -- -c # -c to continue recent claude session
 ```
 
-To run **just the server** without launching Claude — e.g. to browse past captures in
-the UI — use 
+To run **just the server** without launching Claude — e.g. to browse past captures in the UI — use 
 ```bash
-cc-tracer start --server-only
+cc-tracer start --server-only # it will config hooks and start the server.
+
+# To start tracing, you can run 
+ANTHROPIC_BASE_URL=http://127.0.0.1:7355 claude 
+
 ```
 
 ### Stopping
