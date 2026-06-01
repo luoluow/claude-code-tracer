@@ -1,9 +1,13 @@
 # cc-tracer (Local Tracer for Claude Code)
 
+[![PyPI](https://img.shields.io/pypi/v/cc-tracer.svg)](https://pypi.org/project/cc-tracer/)
+[![Python](https://img.shields.io/pypi/pyversions/cc-tracer.svg)](https://pypi.org/project/cc-tracer/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A local, infra-free, raw-fidelity inspector for a **single** Claude Code session — a
 *DevTools Network tab for Claude Code*. Install it, point Claude Code at it, and watch
 one session's hook events and raw API turns on a live timeline like
-![CC Tracer WebUI Example](cc-tracer-webui-example.jpg)
+![CC Tracer WebUI Example](https://github.com/luoluow/claude-code-tracer/blob/master/cc-tracer-webui-example.jpg?raw=true)
  
 ## How it captures
 

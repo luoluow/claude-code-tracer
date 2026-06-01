@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cc-tracer"
-version = "0.1.3"
+version = "0.1.4"
 description = "A local, infra-free, raw-fidelity inspector for a single Claude Code session — a DevTools Network tab for Claude Code."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,7 +29,9 @@ dependencies = ["fastapi", "uvicorn", "httpx"]
 cc-tracer = "cc_tracer.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/zhluo/claude-code-tracer"
+Homepage = "https://github.com/luoluow/claude-code-tracer"
+Repository = "https://github.com/luoluow/claude-code-tracer"
+Issues = "https://github.com/luoluow/claude-code-tracer/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
