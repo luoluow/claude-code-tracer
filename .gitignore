@@ -6,3 +6,6 @@ temp/
 *.egg-info/
 build/
 dist/
+
+# launch / marketing drafts (not part of the project)
+launch/

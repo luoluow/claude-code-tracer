@@ -7,8 +7,8 @@
 A local, infra-free, raw-fidelity inspector for a **single** Claude Code session — a
 *DevTools Network tab for Claude Code*. Install it, point Claude Code at it, and watch
 one session's hook events and raw API turns on a live timeline like
-![CC Tracer WebUI Example](https://github.com/luoluow/claude-code-tracer/blob/master/cc-tracer-webui-example.jpg?raw=true)
- 
+![CC Tracer demo](https://github.com/luoluow/claude-code-tracer/blob/master/cc-tracer-demo.gif?raw=true)
+
 ## How it captures
 
 A local FastAPI server (127.0.0.1:7355) with two capture tiers:
