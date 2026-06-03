@@ -76,6 +76,35 @@ tracer's own entries (your other hooks are left alone). With the server running,
 can also point a Claude session you launch yourself at it with
 `export ANTHROPIC_BASE_URL=http://127.0.0.1:7355`.
 
+## vs. Claude Code's native session transcript
+
+Claude Code already writes a per-session transcript to
+`~/.claude/projects/<project-hash>/<session-uuid>.jsonl` — the file behind
+`--resume`/`--continue`. It's rich: the conversation `content` (user/assistant blocks
+**including `tool_use` and thinking**), per-turn `usage` (token counts), `model`,
+`stop_reason`, tool results, and file-history snapshots.
+
+What the transcript records is the *conversation*, reconstructed for Claude Code's own
+state. What it never stores is the *request as sent on the wire* — and that, plus live
+inspection, is where this tracer differs:
+
+| | This tracer | Native transcript JSONL |
+| --- | --- | --- |
+| Conversation, tool calls / results | ✅ (hook tier) | ✅ |
+| Reasoning / thinking text | ✅ | ✅ (in `content`) |
+| Per-turn token usage | ✅ | ✅ (`message.usage`) |
+| **Assembled system prompt sent to the API** | ✅ | ❌ |
+| **Tool JSON schemas + sampling / cache / beta params** | ✅ | ❌ |
+| **Raw request/response envelope (wire-level)** | ✅ | ❌ |
+| Hook Pre/Post as discrete, timed events | ✅ | ❌ (timestamps only) |
+| Live timeline UI: stream, search, jump-to-error | ✅ | ❌ (static file you grep) |
+
+In short: the transcript is a machine-state file for resume; this tracer adds the
+**wire-level request** (the system prompt, tool schemas, and params that never land in
+the transcript) and a **live DevTools-style view** while the session runs. (Separately,
+`claude --debug` prints verbose runtime logs to the terminal, but that's ephemeral
+stderr, not a structured log.)
+
 ## When to use this vs. OpenTelemetry
 
 Claude Code emits OpenTelemetry natively, and tools like SigNoz, Grafana, and
